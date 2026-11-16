@@ -14,6 +14,10 @@ async def lifespan(app):
    from scripts.seed_demo import seed
    seed()
   except Exception:logging.exception('seed failed')
+ try:
+  from src.services.ledger import ensure_ledgers
+  ensure_ledgers()
+ except Exception:logging.exception('ledger init failed')
  yield
 app=FastAPI(title='维保备件联用发现',lifespan=lifespan)
 app.add_middleware(RequestId);app.add_middleware(SecurityHeaders)

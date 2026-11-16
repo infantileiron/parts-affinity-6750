@@ -8,6 +8,8 @@
 
 四模块是作业清单（录入/修订）、阈值配置（异步挖掘）、规则解释（支持度/置信度/提升度）、备件包（来源规则/说明/签核）。实体 Job、MiningRun、AssociationRule、Kit 都真实持久化；规则按批次单独入表，备件包通过rule_id关联。
 
+第五模块是证据台账（在线联用证据）。备件包签核后不再沿用签核时的旧证据：每个包起草即建立 KitLedger 台账，沿来源批次的设备范围与阈值、来源规则的前后件，持续统计有效作业、前件、后件及共同出现次数，并重算支持度/置信度/提升度，跌破来源阈值即标不达标；签核时原证据快照存入baseline永久保留，与当前证据并排对比。作业更换设备或用件时按贡献行（LedgerContrib）撤销旧贡献再计新贡献，日常更新只动该作业的贡献行，不全扫历史。台账重建（全量幂等刷新）与日常修订并发安全：按作业版本与指纹跳过过期或已计入状态，不漏计、不重复计；重建中（building）到可用（ready）期间录入修订照常计入，计数器随批提交全程可读，失败后保留可读旧版并可从页面重新发起，worker重启自动恢复中断的重建。台账页可发起重建、查看进度（processed/total）和逐包对账（台账计数器 vs 贡献汇总 vs 现场重算）。
+
 |角色|页面权限|典型动作|
 |---|---|---|
 |admin|全部，独占审计和签核|签核适用范围|
@@ -35,6 +37,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 6. 09:40 worker完成后刷新，进入规则解释，核对共同作业数和分母。
 7. 10:00 选择有业务价值的一条规则，点击起草备件包，写“仅限同规格泵组，核对密封材质和数量”。
 8. 10:10 admin签核；10:20 viewer下载 `parts-affinity-<run-id>.json`。
+9. 10:30 打开证据台账：新起草的包重建完成后转为可用；后续录入/修订作业即时改变计数与达标标记，签核时原证据在卡片下方保留，可点“对账”核对三组计数。
 
 ## 算法口径和失败态
 
@@ -59,6 +62,6 @@ Python标准库实现Apriori，最大频繁项集长度3。每张含备件的有
 
 本地开发：先起db/redis，backend安装requirements，配置DATABASE_URL/REDIS_URL/JWT_SECRET后 `uvicorn src.main:app --reload`；前端使用Nginx同源代理或本地同源开发代理。环境变量为COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO、NETWORK_SUBNET，见.env.example。当前显式子网10.253.108.0/24用于规避本机默认池耗尽，迁移可调整。演示凭据与JWT密钥部署时需替换。
 
-枚举ROLES/STATES/EQUIPMENT/PARTS分别在后端`src/constants/enums.py`、输入schema及前端`src/constants/enums.js`；实体列见models/entities.py。测试与截图在`../../test-artifacts/gb-3108/`。
+枚举ROLES/STATES/EQUIPMENT/PARTS分别在后端`src/constants/enums.py`、输入schema及前端`src/constants/enums.js`；实体列见models/entities.py。台账验证脚本与报告在`../test-artifacts/gb-3108/`（进程内SQLite+fakeredis替身，覆盖跨设备修订、重建中写入、中断恢复等52项断言；本环境无Docker/MySQL时的等效验证，生产仍走compose全栈）。
 
 已知范围：逐条表单/API录入，无CSV导入/删除/分页；规则单worker计算，最大项集3件，签核在站内完成，无采购、外部通知或自动作业指令。Google Fonts离线时回退字体；未做大规模压测。许可证MIT，见LICENSE。

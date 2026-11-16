@@ -32,3 +32,6 @@ target/
 *.o
 *.obj
 .DS_Store
+
+# 验证环境产物
+test-artifacts/

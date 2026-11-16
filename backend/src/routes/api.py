@@ -2,12 +2,13 @@ import os,json
 import redis
 from fastapi import APIRouter,Depends,HTTPException,Response
 from src.config.database import db
-from src.models.entities import User,Job,MiningRun,AssociationRule,Kit,Audit
+from src.models.entities import User,Job,MiningRun,AssociationRule,Kit,KitLedger,Audit
 from src.schemas.business import Login,JobInput,RunInput,KitInput,KitEdit
 from src.middlewares.auth import current,editor,admin
 from src.utils.security import verify,token
 from src.services.business import audit,dump
 from src.services.jobs import save_job
+from src.services.ledger import ensure_ledger,enqueue_rebuild,fail_queue,baseline_snapshot,reconcile_ledger
 from src.controllers.business import ensure_run,ensure_rule,ensure_kit
 router=APIRouter()
 @router.post('/auth/login')
@@ -50,7 +51,10 @@ def kits(u=Depends(current),s=Depends(db)):return [dump(r) for r in s.query(Kit)
 def kit(data:KitInput,u=Depends(editor),s=Depends(db)):
  rule=ensure_rule(s,data.rule_id)
  if ensure_run(s,rule.run_id).state!='done':raise HTTPException(409,'来源规则尚未完成')
- r=Kit(**data.model_dump(),parts=sorted(set(rule.antecedent+rule.consequent)));s.add(r);s.commit();audit(s,u,'起草备件包 '+str(r.id));return dump(r)
+ r=Kit(**data.model_dump(),parts=sorted(set(rule.antecedent+rule.consequent)));s.add(r);s.commit()
+ ensure_ledger(s,r.id)
+ if not enqueue_rebuild(r.id):fail_queue(s,r.id)
+ audit(s,u,'起草备件包 '+str(r.id));return dump(r)
 @router.put('/kits/{i}')
 def edit_kit(i:int,data:KitEdit,u=Depends(editor),s=Depends(db)):
  r=ensure_kit(s,i)
@@ -60,6 +64,38 @@ def edit_kit(i:int,data:KitEdit,u=Depends(editor),s=Depends(db)):
 def approve(i:int,u=Depends(admin),s=Depends(db)):
  r=ensure_kit(s,i)
  if r.status!='draft':raise HTTPException(409,'已签核方案不可重复签核')
- r.status='approved';s.commit();audit(s,u,'签核备件包 '+str(i));return dump(r)
+ r.status='approved'
+ existed=s.query(KitLedger).filter_by(kit_id=i).first()
+ l=ensure_ledger(s,i)
+ if l and not existed and not enqueue_rebuild(i):fail_queue(s,i)
+ if l and not l.baseline:l.baseline=baseline_snapshot(s,r,l)
+ s.commit();audit(s,u,'签核备件包 '+str(i));return dump(r)
+@router.get('/ledgers')
+def ledgers(u=Depends(current),s=Depends(db)):return [dump(r) for r in s.query(KitLedger).order_by(KitLedger.kit_id).all()]
+@router.get('/kits/{i}/ledger')
+def ledger_detail(i:int,u=Depends(current),s=Depends(db)):
+ ensure_kit(s,i)
+ l=s.query(KitLedger).filter_by(kit_id=i).first()
+ if not l:raise HTTPException(404,'该备件包台账尚未建立')
+ return dump(l)
+@router.post('/kits/{i}/ledger/rebuild')
+def rebuild(i:int,u=Depends(editor),s=Depends(db)):
+ ensure_kit(s,i)
+ if s.query(KitLedger).filter_by(kit_id=i).first():
+  n=s.query(KitLedger).filter(KitLedger.kit_id==i,KitLedger.state.in_(['ready','failed'])).update({'state':'building','error':''},synchronize_session=False)
+  s.commit()
+  if not n:raise HTTPException(409,'台账重建进行中，请稍候')
+ else:
+  if not ensure_ledger(s,i):raise HTTPException(409,'来源规则已失效，无法建立台账')
+ if not enqueue_rebuild(i):
+  fail_queue(s,i);raise HTTPException(503,'队列暂不可用，请恢复后重新发起重建')
+ audit(s,u,'发起台账重建 备件包 '+str(i))
+ return dump(s.query(KitLedger).filter_by(kit_id=i).first())
+@router.get('/kits/{i}/ledger/reconcile')
+def reconcile(i:int,u=Depends(current),s=Depends(db)):
+ ensure_kit(s,i)
+ l=s.query(KitLedger).filter_by(kit_id=i).first()
+ if not l:raise HTTPException(404,'该备件包台账尚未建立')
+ return reconcile_ledger(s,l)
 @router.get('/audits')
 def audits(u=Depends(admin),s=Depends(db)):return [dump(r) for r in s.query(Audit).order_by(Audit.id.desc()).limit(100)]
